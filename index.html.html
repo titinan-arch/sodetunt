@@ -590,31 +590,7 @@ function autoSelectCover(link){
 }
 
 /* ---------------- storage ---------------- */
-async function loadAlbums(){
-  albums = [];
-  try{
-    const listRes = await window.storage.list(STORAGE_PREFIX, true);
-    const keys = (listRes && listRes.keys) || [];
-    const results = await Promise.all(keys.map(async (key)=>{
-      try{
-        const res = await window.storage.get(key, true);
-        return res && res.value ? JSON.parse(res.value) : null;
-      }catch(e){ return null; }
-    }));
-    albums = results.filter(Boolean);
-  }catch(e){
-    albums = [];
-  }
-}
-async function saveAlbumRecord(album){
-  try{
-    await window.storage.set(STORAGE_PREFIX + album.id, JSON.stringify(album), true);
-    return true;
-  }catch(e){
-    showToast("บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง (ไฟล์ภาพอาจใหญ่เกินไป)");
-    return false;
-  }
-}
+loadAlbums
 async function deleteAlbumRecord(id){
   try{
     await window.storage.delete(STORAGE_PREFIX + id, true);
