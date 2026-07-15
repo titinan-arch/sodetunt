@@ -536,392 +536,162 @@ function compressImageFile(file, maxDim = 1280, quality = 0.75){
   });
 }
 
-/* ---------------- date / academic-year helpers ---------------- */
-function toBuddhistYear(adYear){ return adYear + 543; }
+/* ----------------- data (ระบบฐานข้อมูลและปุ่มบันทึกแบบใหม่) ----------------- */
 
-// Returns the Thai academic year (พ.ศ.) that a given AD date belongs to.
-// School year runs May -> April, e.g. 15 Jun 2025 => ปีการศึกษา 2568
-function academicYearOf(dateObj){
-  const m = dateObj.getMonth() + 1;
-  const beYear = toBuddhistYear(dateObj.getFullYear());
-  return m >= 5 ? beYear : beYear - 1;
+// 1. ฟังก์ชันเปิดฐานข้อมูลในเบราว์เซอร์
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("AudioVisualGalleryDB", 1);
+    request.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains("albums")) {
+        db.createObjectStore("albums", { keyPath: "id" });
+      }
+    };
+    request.onsuccess = (e) => resolve(e.target.result);
+    request.onerror = (e) => reject(e.target.error);
+  });
 }
 
-// Plain calendar-year (พ.ศ.) the activity actually took place in — this can
-// differ from academicYearOf() for events held Jan-Apr, e.g. an event on
-// 10 Jan 2026 is ปีพ.ศ. 2569 but still ปีการศึกษา 2568.
-function eventYearOf(dateObj){
-  return toBuddhistYear(dateObj.getFullYear());
+// 2. ฟังก์ชันโหลดข้อมูลอัลบั้มทั้งหมดมาแสดงเมื่อเปิดเว็บ
+async function loadAlbums() {
+  try {
+    const db = await openDB();
+    const transaction = db.transaction("albums", "readonly");
+    const store = transaction.objectStore("albums");
+    const request = store.getAll();
+
+    request.onsuccess = () => {
+      albums = request.result || [];
+      albums.sort((a, b) => b.createdAt - a.createdAt);
+      populateFilters();
+      render();
+    };
+  } catch (error) {
+    console.error("โหลดข้อมูลล้มเหลว:", error);
+    showToast("ไม่สามารถโหลดข้อมูลอัลบั้มได้");
+    albums = [];
+    render();
+  }
 }
 
-function formatThaiDate(dateObj, timeStr){
-  const d = dateObj.getDate();
-  const m = THAI_MONTHS[dateObj.getMonth()+1];
-  const y = toBuddhistYear(dateObj.getFullYear());
-  let out = `${d} ${m} ${y}`;
-  if (timeStr) out += ` เวลา ${timeStr} น.`;
-  return out;
-}
-
-function shortThaiDate(dateObj){
-  const d = dateObj.getDate();
-  const m = THAI_MONTHS[dateObj.getMonth()+1].slice(0,3);
-  const y = String(toBuddhistYear(dateObj.getFullYear())).slice(-2);
-  return `${d} ${m} ${y}`;
-}
-
-/* ---------------- "smart cover" placeholder engine ----------------
-   NOTE: A browser cannot read the contents of a private Google Photos
-   album directly (no public API access + CORS blocks scraping the page).
-   To make "เลือกภาพที่ดีที่สุด" work for real in production, wire this
-   function up to a small backend endpoint that either:
-     1) calls the Google Photos Library API (needs OAuth + album access), or
-     2) fetches the shared album's og:image meta tag server-side.
-   Below is a deterministic stand-in so the UI/UX is fully demonstrable:
-   the same link always "auto-picks" the same representative image. */
-function hashString(str){
-  let h = 0;
-  for (let i=0;i<str.length;i++){ h = (h*31 + str.charCodeAt(i)) >>> 0; }
-  return h;
-}
-function autoSelectCover(link){
-  const seed = hashString(link || String(Date.now()));
-  return `https://picsum.photos/seed/${seed}/800/600`;
-}
-
-/* ---------------- storage ---------------- */
-loadAlbums
-async function deleteAlbumRecord(id){
-  try{
-    await window.storage.delete(STORAGE_PREFIX + id, true);
-    return true;
-  }catch(e){
-    showToast("ลบไม่สำเร็จ ลองใหม่อีกครั้ง");
+// 3. ฟังก์ชันบันทึกข้อมูลอัลบั้มลงฐานข้อมูล
+async function saveAlbumRecord(albumObj) {
+  try {
+    const db = await openDB();
+    const transaction = db.transaction("albums", "readwrite");
+    const store = transaction.objectStore("albums");
+    
+    return new Promise((resolve) => {
+      const request = store.put(albumObj);
+      request.onsuccess = () => resolve(true);
+      request.onerror = (e) => {
+        console.error("IndexedDB Error:", e.target.error);
+        resolve(false);
+      };
+    });
+  } catch (error) {
+    console.error("ข้อผิดพลาดระบบฐานข้อมูล:", error);
     return false;
   }
 }
 
-/* ---------------- rendering ---------------- */
-const mainEl = document.getElementById("mainContent");
-const countPill = document.getElementById("countPill");
-const filterYearEl = document.getElementById("filterYear");
-const filterEventYearEl = document.getElementById("filterEventYear");
-const filterMonthEl = document.getElementById("filterMonth");
-const searchInputEl = document.getElementById("searchInput");
-
-function populateFilters(){
-  const years = [...new Set(albums.map(a => a.academicYear))].sort((a,b)=>b-a);
-  filterYearEl.innerHTML = '<option value="">ทุกปีการศึกษา</option>' +
-    years.map(y=>`<option value="${y}">ปีการศึกษา ${y}</option>`).join("");
-
-  const eventYears = [...new Set(albums.map(a => a.eventYear))].sort((a,b)=>b-a);
-  filterEventYearEl.innerHTML = '<option value="">ทุกปีพ.ศ.</option>' +
-    eventYears.map(y=>`<option value="${y}">พ.ศ. ${y}</option>`).join("");
-
-  filterMonthEl.innerHTML = '<option value="">ทุกเดือน</option>' +
-    ACADEMIC_MONTH_ORDER.map(m=>`<option value="${m}">${THAI_MONTHS[m]}</option>`).join("");
-}
-
-function svgIcon(name){
-  if(name==="link") return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
-  return "";
-}
-
-function render(){
-  const yFilter = filterYearEl.value;
-  const eyFilter = filterEventYearEl.value;
-  const mFilter = filterMonthEl.value;
-  const q = searchInputEl.value.trim().toLowerCase();
-
-  let filtered = albums.filter(a=>{
-    if (yFilter && String(a.academicYear) !== yFilter) return false;
-    if (eyFilter && String(a.eventYear) !== eyFilter) return false;
-    if (mFilter && String(a.month) !== mFilter) return false;
-    if (q && !a.title.toLowerCase().includes(q)) return false;
-    return true;
-  });
-
-  countPill.textContent = `${filtered.length} อัลบั้ม`;
-
-  if (filtered.length === 0){
-    mainEl.innerHTML = `
-      <div class="empty-state">
-        <h3>ยังไม่มีอัลบั้มภาพ</h3>
-        <p>กดปุ่ม “+” ที่มุมขวาล่างเพื่อเพิ่มอัลบั้มกิจกรรมแรกของคุณ</p>
-      </div>`;
-    return;
-  }
-
-  // group by academic year desc -> by month in academic order desc within year
-  const years = [...new Set(filtered.map(a=>a.academicYear))].sort((a,b)=>b-a);
-
-  mainEl.innerHTML = years.map(year=>{
-    const yearAlbums = filtered.filter(a=>a.academicYear===year);
-    const monthsPresent = ACADEMIC_MONTH_ORDER.filter(m => yearAlbums.some(a=>a.month===m)).reverse();
-
-    const monthsHtml = monthsPresent.map(month=>{
-      const monthAlbums = yearAlbums
-        .filter(a=>a.month===month)
-        .sort((a,b)=> new Date(b.date) - new Date(a.date));
-
-      return `
-        <div class="month-block">
-          <div class="month-head">${THAI_MONTHS[month]} ${year}</div>
-          <div class="grid">
-            ${monthAlbums.map(cardHtml).join("")}
-          </div>
-        </div>`;
-    }).join("");
-
-    return `
-      <section class="year-block">
-        <div class="year-head">
-          <h2>ปีการศึกษา <span class="yr-chip">${year}</span></h2>
-          <div class="rule"></div>
-        </div>
-        ${monthsHtml}
-      </section>`;
-  }).join("");
-
-  // wire delete buttons
-  mainEl.querySelectorAll(".del-btn").forEach(btn=>{
-    btn.addEventListener("click", async (e)=>{
-      e.preventDefault(); e.stopPropagation();
-      const id = btn.dataset.id;
-      if (!confirm("ลบอัลบั้มนี้หรือไม่?")) return;
-      const ok = await deleteAlbumRecord(id);
-      if (ok){
-        albums = albums.filter(a=>a.id!==id);
-        populateFilters();
-        render();
-        showToast("ลบอัลบั้มแล้ว");
-      }
+// 4. ฟังก์ชันลบอัลบั้มออกจากฐานข้อมูล
+async function deleteAlbumRecord(id) {
+  try {
+    const db = await openDB();
+    const transaction = db.transaction("albums", "readwrite");
+    const store = transaction.objectStore("albums");
+    
+    return new Promise((resolve) => {
+      const request = store.delete(id);
+      request.onsuccess = () => resolve(true);
+      request.onerror = () => resolve(false);
     });
-  });
-}
-
-function cardHtml(a){
-  const d = new Date(a.date);
-  return `
-    <a class="card" href="${a.link}" target="_blank" rel="noopener noreferrer">
-      <div class="tape"></div>
-      <button class="del-btn" data-id="${a.id}" title="ลบอัลบั้ม">🗑</button>
-      <div class="thumb-wrap">
-        <img src="${a.cover}" alt="${a.title}" loading="lazy">
-        <span class="cover-tag">${a.coverMode==="auto" ? "ปกอัตโนมัติ" : (a.coverMode==="upload" ? "ปกจากไฟล์อัปโหลด" : "ปกที่เลือกเอง")}</span>
-        <span class="date-chip">${shortThaiDate(d)}</span>
-      </div>
-      <div class="title">${escapeHtml(a.title)}</div>
-      <div class="meta">${svgIcon("link")} Google Photos ${a.time ? "· "+a.time+" น." : ""}</div>
-    </a>`;
-}
-
-function escapeHtml(str){
-  const div = document.createElement("div");
-  div.textContent = str;
-  return div.innerHTML;
-}
-
-/* ---------------- toast ---------------- */
-let toastTimer;
-function showToast(msg){
-  const t = document.getElementById("toast");
-  t.textContent = msg;
-  t.classList.add("show");
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(()=>t.classList.remove("show"), 2600);
-}
-
-/* ---------------- modal logic ---------------- */
-const overlay = document.getElementById("overlay");
-const fabAdd = document.getElementById("fabAdd");
-const closeModal = document.getElementById("closeModal");
-const cancelBtn = document.getElementById("cancelBtn");
-const saveBtn = document.getElementById("saveBtn");
-
-const fTitle = document.getElementById("fTitle");
-const fLink = document.getElementById("fLink");
-const fDate = document.getElementById("fDate");
-const fTime = document.getElementById("fTime");
-const fCoverUrl = document.getElementById("fCoverUrl");
-const manualPreviewImg = document.getElementById("manualPreviewImg");
-
-const btnUpload = document.getElementById("btnUpload");
-const btnManual = document.getElementById("btnManual");
-const btnAuto = document.getElementById("btnAuto");
-const paneUpload = document.getElementById("paneUpload");
-const paneManual = document.getElementById("paneManual");
-const paneAuto = document.getElementById("paneAuto");
-const btnRunAuto = document.getElementById("btnRunAuto");
-const autoPreview = document.getElementById("autoPreview");
-const autoPreviewImg = document.getElementById("autoPreviewImg");
-
-const uploadZone = document.getElementById("uploadZone");
-const fCoverFile = document.getElementById("fCoverFile");
-const uploadPreview = document.getElementById("uploadPreview");
-const uploadPreviewImg = document.getElementById("uploadPreviewImg");
-const uploadFilename = document.getElementById("uploadFilename");
-const uploadRemove = document.getElementById("uploadRemove");
-const uploadError = document.getElementById("uploadError");
-
-let coverMode = "upload";
-let autoChosenCover = "";
-let uploadedCoverData = "";
-const MAX_COVER_BYTES = 4.5 * 1024 * 1024; // stay safely under the 5MB per-key storage limit
-
-function openModal(){
-  overlay.classList.add("open");
-  document.body.style.overflow = "hidden";
-}
-function shutModal(){
-  overlay.classList.remove("open");
-  document.body.style.overflow = "";
-  resetForm();
-}
-function resetForm(){
-  fTitle.value=""; fLink.value=""; fDate.value=""; fTime.value=""; fCoverUrl.value="";
-  fCoverFile.value="";
-  manualPreviewImg.style.display="none";
-  autoPreview.classList.remove("show");
-  uploadPreview.classList.remove("show");
-  uploadError.classList.remove("show");
-  autoChosenCover="";
-  uploadedCoverData="";
-  document.getElementById("yearReadout").textContent = "ระบุวันที่เพื่อดูปีพ.ศ. และปีการศึกษาที่จะจัดเก็บ";
-  setCoverMode("upload");
-  validateForm();
-}
-
-fabAdd.addEventListener("click", openModal);
-closeModal.addEventListener("click", shutModal);
-cancelBtn.addEventListener("click", shutModal);
-overlay.addEventListener("click", (e)=>{ if(e.target===overlay) shutModal(); });
-
-function setCoverMode(mode){
-  coverMode = mode;
-  btnUpload.classList.toggle("active", mode==="upload");
-  btnManual.classList.toggle("active", mode==="manual");
-  btnAuto.classList.toggle("active", mode==="auto");
-  paneUpload.classList.toggle("active", mode==="upload");
-  paneManual.classList.toggle("active", mode==="manual");
-  paneAuto.classList.toggle("active", mode==="auto");
-  validateForm();
-}
-btnUpload.addEventListener("click", ()=>setCoverMode("upload"));
-btnManual.addEventListener("click", ()=>setCoverMode("manual"));
-btnAuto.addEventListener("click", ()=>setCoverMode("auto"));
-
-/* ---- file upload from computer ---- */
-async function handleCoverFile(file){
-  if (!file || !file.type.startsWith("image/")) return;
-  uploadError.classList.remove("show");
-  try{
-    const dataUrl = await compressImageFile(file);
-    const approxBytes = Math.round((dataUrl.length - "data:image/jpeg;base64,".length) * 0.75);
-    if (approxBytes > MAX_COVER_BYTES){
-      uploadError.textContent = "ไฟล์มีขนาดใหญ่เกินไปแม้ย่อขนาดแล้ว กรุณาเลือกรูปอื่น";
-      uploadError.classList.add("show");
-      return;
-    }
-    uploadedCoverData = dataUrl;
-    uploadPreviewImg.src = dataUrl;
-    uploadFilename.textContent = file.name;
-    uploadPreview.classList.add("show");
-  }catch(err){
-    uploadError.textContent = "ไม่สามารถอ่านไฟล์ภาพนี้ได้ กรุณาลองไฟล์อื่น";
-    uploadError.classList.add("show");
+  } catch (error) {
+    console.error(error);
+    return false;
   }
-  validateForm();
 }
 
-uploadZone.addEventListener("click", ()=>fCoverFile.click());
-fCoverFile.addEventListener("change", ()=>{
-  if (fCoverFile.files && fCoverFile.files[0]) handleCoverFile(fCoverFile.files[0]);
-});
-["dragover","dragenter"].forEach(evt=>{
-  uploadZone.addEventListener(evt, (e)=>{ e.preventDefault(); uploadZone.classList.add("dragover"); });
-});
-["dragleave","drop"].forEach(evt=>{
-  uploadZone.addEventListener(evt, (e)=>{ e.preventDefault(); uploadZone.classList.remove("dragover"); });
-});
-uploadZone.addEventListener("drop", (e)=>{
-  const file = e.dataTransfer.files && e.dataTransfer.files[0];
-  if (file) handleCoverFile(file);
-});
-uploadRemove.addEventListener("click", (e)=>{
-  e.stopPropagation();
-  uploadedCoverData = "";
-  fCoverFile.value = "";
-  uploadPreview.classList.remove("show");
-  validateForm();
-});
-
-fCoverUrl.addEventListener("input", ()=>{
-  const url = fCoverUrl.value.trim();
-  if (url){
-    manualPreviewImg.src = url;
-    manualPreviewImg.style.display = "block";
-  } else {
-    manualPreviewImg.style.display = "none";
-  }
-  validateForm();
-});
-
-btnRunAuto.addEventListener("click", ()=>{
-  btnRunAuto.disabled = true;
-  btnRunAuto.textContent = "⏳ กำลังวิเคราะห์ภาพ...";
-  const link = fLink.value.trim();
-  setTimeout(()=>{
-    autoChosenCover = autoSelectCover(link || fTitle.value);
-    autoPreviewImg.src = autoChosenCover;
-    autoPreview.classList.add("show");
-    btnRunAuto.disabled = false;
-    btnRunAuto.textContent = "🔁 สุ่มใหม่อีกครั้ง";
-    validateForm();
-  }, 900);
-});
-
-[fTitle, fLink, fDate].forEach(el=>el.addEventListener("input", validateForm));
-
-const yearReadout = document.getElementById("yearReadout");
-fDate.addEventListener("input", ()=>{
-  if (!fDate.value){
-    yearReadout.textContent = "ระบุวันที่เพื่อดูปีพ.ศ. และปีการศึกษาที่จะจัดเก็บ";
+// 5. โค้ดส่วนจัดการเมื่อกดปุ่มบันทึกอัลบั้ม
+saveBtn.addEventListener("click", async () => {
+  if (!fDate.value || !fTitle.value.trim()) {
+    showToast("กรุณากรอกข้อมูลที่จำเป็นให้ครบถ้วน");
     return;
   }
-  const d = new Date(fDate.value + "T00:00:00");
-  yearReadout.textContent = `จะจัดเก็บใน ปีการศึกษา ${academicYearOf(d)} · ปีพ.ศ. ${eventYearOf(d)} · ${THAI_MONTHS[d.getMonth()+1]}`;
-});
 
-function validateForm(){
-  const hasBasics = fTitle.value.trim() && fLink.value.trim() && fDate.value;
-  let hasCover = false;
-  if (coverMode==="upload") hasCover = !!uploadedCoverData;
-  else if (coverMode==="manual") hasCover = !!fCoverUrl.value.trim();
-  else hasCover = !!autoChosenCover;
-  saveBtn.disabled = !(hasBasics && hasCover);
-}
-
-saveBtn.addEventListener("click", async ()=>{
   const dateObj = new Date(fDate.value + "T00:00:00");
   let cover = "";
-  if (coverMode==="upload") cover = uploadedCoverData;
-  else if (coverMode==="manual") cover = fCoverUrl.value.trim();
+  if (coverMode === "upload") cover = uploadedCoverData;
+  else if (coverMode === "manual") cover = fCoverUrl.value.trim();
   else cover = autoChosenCover;
 
   const album = {
-    id: "alb_" + Date.now() + "_" + Math.random().toString(36).slice(2,7),
+    id: "alb_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7),
     title: fTitle.value.trim(),
     link: fLink.value.trim(),
     date: fDate.value,
     time: fTime.value || "",
     cover: cover,
     coverMode: coverMode,
-    month: dateObj.getMonth()+1,
+    month: dateObj.getMonth() + 1,
     academicYear: academicYearOf(dateObj),
     eventYear: eventYearOf(dateObj),
     createdAt: Date.now()
   };
+
+  saveBtn.disabled = true;
+  saveBtn.textContent = "กำลังบันทึก...";
+  
+  const ok = await saveAlbumRecord(album);
+  saveBtn.textContent = "บันทึกอัลบั้ม";
+
+  if (ok) {
+    albums.push(album);
+    albums.sort((a, b) => b.createdAt - a.createdAt);
+    populateFilters();
+    render();
+    shutModal(); 
+    showToast("เพิ่มอัลบั้มเรียบร้อยแล้ว ✓");
+  } else {
+    saveBtn.disabled = false;
+    showToast("บันทึกไม่สำเร็จ กรุณาลองใหม่อีกครั้ง");
+  }
+});
+
+// 6. โค้ดส่วนจัดการเมื่อกดปุ่มลบอัลบั้ม (.del-btn)
+document.addEventListener("click", async (e) => {
+  const delBtn = e.target.closest(".del-btn");
+  if (!delBtn) return;
+  
+  e.preventDefault();
+  e.stopPropagation();
+  
+  const albumId = delBtn.getAttribute("data-id");
+  if (confirm("คุณแน่ใจหรือไม่ว่าต้องการลบอัลบั้มนี้?")) {
+    const ok = await deleteAlbumRecord(albumId);
+    if (ok) {
+      albums = albums.filter(a => a.id !== albumId);
+      populateFilters();
+      render();
+      showToast("ลบอัลบั้มเรียบร้อยแล้ว");
+    } else {
+      showToast("ลบไม่สำเร็จ");
+    }
+  }
+});
+
+/* ---------------- filters ---------------- */
+filterYearEl.addEventListener("change", render);
+filterEventYearEl.addEventListener("change", render);
+filterMonthEl.addEventListener("change", render);
+searchInp.addEventListener("input", render);
+
+// ดึงข้อมูลเก่ามาแสดงและเปิดใช้งานระบบฐานข้อมูลทันทีเมื่อเปิดหน้าเว็บ
+document.addEventListener("DOMContentLoaded", () => {
+  loadAlbums();
+});
 
   saveBtn.disabled = true;
   saveBtn.textContent = "กำลังบันทึก...";
